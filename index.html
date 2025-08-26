@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=yes">
+  <meta charset="UTF-8" />
+  <title>Random Image Navigator</title>
+  <style>
+    body {
+      margin: 0; padding: 0;
+      background: #000;
+      color: #fff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .image-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+    img {
+      max-width: 100vw;
+      max-height: 100vh;
+      object-fit: contain;
+      border: 3px solid #fff;
+      border-radius: 8px;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(1);
+      transform-origin: center;
+      -webkit-user-drag: none;
+      transition: transform 0.1s ease-out;
+    }
+    .controls {
+      position: fixed;
+      bottom: 10px;
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 20px;
+      box-sizing: border-box;
+      pointer-events: none;
+      z-index: 1000;
+    }
+    .controls button {
+      font-size: 1.3em;
+      padding: 0.2em 0.6em;
+      cursor: pointer;
+      border-radius: 5px;
+      border: none;
+      background: rgba(30,30,30,0.8);
+      color: #fff;
+      user-select: none;
+      transition: background 0.3s;
+      pointer-events: auto;
+      margin: 0 4px;
+    }
+    .controls button:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+    .controls button:hover:not(:disabled) {
+      background: rgba(70,70,70,0.9);
+    }
+    .version-info {
+      position: fixed;
+      bottom: 5px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.7em;
+      opacity: 0.5;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      img { cursor: grab; }
+      img:active { cursor: grabbing; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="image-container">
+  <img id="mainImage" src="" alt="Random Image" draggable="false" />
+</div>
+
+<div class="controls">
+  <button id="backBtn" disabled aria-label="Previous image">←</button>
+  <div>
+    <button id="resetBtn" aria-label="Reset zoom">↻</button>
+    <button id="flipBtn" aria-label="Flip horizontal">↔</button>
+    <button id="copyBtn" aria-label="Copy image link">📋</button>
+  </div>
+  <button id="forwardBtn" disabled aria-label="Next image">→</button>
+</div>
+
+<div class="version-info">Version 4</div>
+
+<script>
+  // Current version: 4
+
+  const baseURL = 'https://f003.backblazeb2.com/file/links-ref/';
+  const imgElement = document.getElementById('mainImage');
+  const backBtn = document.getElementById('backBtn');
+  const forwardBtn = document.getElementById('forwardBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const flipBtn = document.getElementById('flipBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const imageContainer = document.querySelector('.image-container');
+
+  let allImages = [];
+  let currentImage = null;
+  let historyStack = [];
+  let forwardStack = [];
+  const maxHistory = 5;
+  const maxPreload = 7;
+
+  // Panning & zoom
+  let isDragging = false;
+  let startPos = { x: 0, y: 0 };
+  let translate = { x: 0, y: 0 };
+  let scale = 1;
+  let isFlipped = false;
+  const minScale = 0.5;
+  const maxScale = 4;
+  const scaleStep = 0.2;
+
+  // Swipe detection
+  let touchStartX = 0;
+  let touchEndX = 0;
+  const swipeThreshold = 50;
+
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
+  if (isStandalone) {
+    const viewportMeta = document.querySelector('meta[name="viewport"]');
+    viewportMeta.content = viewportMeta.content.replace(/user-scalable=no/, 'user-scalable=yes');
+  }
+
+  // Swipe (mobile)
+  imageContainer.addEventListener('touchstart', e => {
+    touchStartX = e.changedTouches[0].screenX;
+  }, { passive: true });
+
+  imageContainer.addEventListener('touchend', e => {
+    touchEndX = e.changedTouches[0].screenX;
+    handleSwipe();
+  }, { passive: true });
+
+  function handleSwipe() {
+    const deltaX = touchEndX - touchStartX;
+    if (Math.abs(deltaX) > swipeThreshold) {
+      if (deltaX > 0) navigateBack();
+      else navigateForward();
+    }
+  }
+
+  // Panning (desktop)
+  if (!isStandalone) {
+    document.addEventListener('dragstart', e => { if (e.target === imgElement) e.preventDefault(); });
+    imgElement.addEventListener('contextmenu', e => e.preventDefault());
+
+    imgElement.addEventListener('mousedown', e => {
+      e.preventDefault();
+      isDragging = true;
+      startPos = { x: e.clientX, y: e.clientY };
+      imgElement.style.cursor = 'grabbing';
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!isDragging) return;
+      e.preventDefault();
+      const currentPos = { x: e.clientX, y: e.clientY };
+      translate.x += currentPos.x - startPos.x;
+      translate.y += currentPos.y - startPos.y;
+      startPos = currentPos;
+      updateImageTransform();
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+      imgElement.style.cursor = 'grab';
+    });
+  }
+
+  function updateImageTransform() {
+    const flipValue = isFlipped ? -1 : 1;
+    imgElement.style.transform = `
+      translate(calc(-50% + ${translate.x}px), calc(-50% + ${translate.y}px))
+      scale(${scale * flipValue}, ${scale})
+    `;
+  }
+
+  function resetImagePosition() {
+    translate = { x: 0, y: 0 };
+    scale = 1;
+    isFlipped = false;
+    updateImageTransform();
+  }
+
+  function zoomAtPosition(zoomDirection) {
+    if (isStandalone) return;
+    scale = zoomDirection === 'in' ? Math.min(scale + scaleStep, maxScale) : Math.max(scale - scaleStep, minScale);
+    updateImageTransform();
+  }
+
+  function toggleFlip() {
+    isFlipped = !isFlipped;
+    updateImageTransform();
+  }
+
+  function updateButtons() {
+    backBtn.disabled = historyStack.length === 0;
+    forwardBtn.disabled = forwardStack.length === 0;
+  }
+
+  async function loadImageList() {
+    try {
+      const response = await fetch(`${baseURL}cleanrefs.txt`);
+      if (!response.ok) throw new Error("Could not fetch cleanrefs.txt");
+      const text = await response.text();
+      allImages = text.trim().split('\n').filter(Boolean);
+      showRandomImage();
+    } catch (err) {
+      console.error("Error loading cleanrefs.txt:", err);
+    }
+  }
+
+  function getRandomImageSource() {
+    if (allImages.length === 0) return null;
+    const randomIndex = Math.floor(Math.random() * allImages.length);
+    return { url: allImages[randomIndex], index: randomIndex };
+  }
+
+  function preloadForwardImages() {
+    if (forwardStack.length > 0) return;
+    const tempForwardStack = [];
+    const preloadPromises = [];
+    for (let i = 0; i < maxPreload; i++) {
+      const image = getRandomImageSource();
+      if (!image) break;
+      const img = new Image();
+      const loadPromise = new Promise(resolve => {
+        img.onload = () => { tempForwardStack.push(image); resolve(); };
+        img.onerror = resolve;
+      });
+      img.src = image.url;
+      preloadPromises.push(loadPromise);
+    }
+    Promise.all(preloadPromises).then(() => {
+      if (tempForwardStack.length > 0) {
+        forwardStack = tempForwardStack;
+        updateButtons();
+      }
+    });
+  }
+
+  function showImage(imageData) {
+    const testImg = new Image();
+    testImg.onload = function() {
+      if (this.naturalWidth >= 400 && this.naturalHeight >= 400) {
+        imgElement.src = imageData.url;
+        imgElement.alt = `Image`;
+        currentImage = imageData;
+        resetImagePosition();
+        setTimeout(preloadForwardImages, 0);
+        updateButtons();
+      } else {
+        forwardStack = [];
+        showRandomImage();
+      }
+    };
+    testImg.onerror = function() {
+      forwardStack = [];
+      showRandomImage();
+    };
+    testImg.src = imageData.url;
+  }
+
+  function showRandomImage() {
+    const image = getRandomImageSource();
+    if (image) {
+      if (currentImage) {
+        historyStack.push(currentImage);
+        if (historyStack.length > maxHistory) historyStack.shift();
+      }
+      showImage(image);
+    } else {
+      imgElement.alt = "No images loaded.";
+    }
+  }
+
+  // Controls
+  backBtn.addEventListener('click', navigateBack);
+  forwardBtn.addEventListener('click', navigateForward);
+  resetBtn.addEventListener('click', resetImagePosition);
+  flipBtn.addEventListener('click', toggleFlip);
+  copyBtn.addEventListener('click', copyImageLink);
+
+  function navigateBack() {
+    if (historyStack.length > 0) {
+      if (currentImage) {
+        forwardStack.unshift(currentImage);
+        if (forwardStack.length > maxPreload) forwardStack.pop();
+      }
+      const prev = historyStack.pop();
+      showImage(prev);
+    }
+  }
+
+  function navigateForward() {
+    if (forwardStack.length > 0) {
+      if (currentImage) {
+        historyStack.push(currentImage);
+        if (historyStack.length > maxHistory) historyStack.shift();
+      }
+      const next = forwardStack.shift();
+      showImage(next);
+      if (forwardStack.length < 2) preloadForwardImages();
+    } else {
+      showRandomImage();
+    }
+  }
+
+  function copyImageLink() {
+    if (currentImage && currentImage.url) {
+      navigator.clipboard.writeText(currentImage.url).then(() => {
+        copyBtn.textContent = "✅";
+        setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+      }).catch(err => {
+        console.error("Failed to copy:", err);
+      });
+    }
+  }
+
+  // Keyboard shortcuts
+  if (!isStandalone) {
+    document.addEventListener('keydown', e => {
+      const key = e.key.toLowerCase();
+      if (['a','d','w','s','r','f','c'].includes(key)) e.preventDefault();
+      switch (key) {
+        case 'a': navigateBack(); break;
+        case 'd': navigateForward(); break;
+        case 'w': zoomAtPosition('in'); break;
+        case 's': zoomAtPosition('out'); break;
+        case 'r': resetImagePosition(); break;
+        case 'f': toggleFlip(); break;
+        case 'c': copyImageLink(); break;
+      }
+    });
+  }
+
+  // Start
+  window.addEventListener('DOMContentLoaded', loadImageList);
+</script>
+</body>
+</html>
